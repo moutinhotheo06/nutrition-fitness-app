@@ -8,7 +8,7 @@ Rien ici ne touche le site en ligne, Code.gs ni les Apps Script actuels. La basc
 | Fichier | Rôle |
 |---|---|
 | `001_schema.sql` | Tables, règles de sécurité (RLS), temps réel pour la messagerie. Testé sur PostgreSQL 16 (réexécutable). |
-| `Migration.gs` + `appsscript.json` | Copie Sheets → Supabase dans un **nouveau** projet Apps Script, en lecture seule sur le classeur. |
+| `Migration.gs` + `appsscript.json` | Copie Sheets → Supabase dans un **nouveau** projet Apps Script, sans aucune écriture dans le classeur. |
 | `functions/auth-login/index.ts` | Connexion unique : convertit le mot de passe à la 1re connexion, sans PEPPER ni hash copiés. |
 
 ## Étape 1 : vérifs dans le tableau de bord Supabase (5 min)
@@ -29,7 +29,7 @@ SQL Editor → New query → colle tout `001_schema.sql` → Run. Tu dois voir �
 
 1. Va sur script.new (nouveau projet, **pas** celui du site). Nomme-le « Spary – Migration ».
 2. Colle `Migration.gs` dans Code.gs de CE projet.
-3. Paramètres du projet → coche « Afficher le fichier manifeste appsscript.json » → remplace son contenu par `appsscript.json` (lecture seule sur le classeur).
+3. Paramètres du projet → coche « Afficher le fichier manifeste appsscript.json » → remplace son contenu par `appsscript.json`. Google demandera l'accès aux feuilles (il n'accorde pas de lecture seule pour ouvrir un classeur par son id) ; le script, lui, ne fait que lire.
 4. Paramètres du projet → Script Properties :
    - `SUPABASE_URL` = `https://chaqyhfkccjpzqcmxpfg.supabase.co`
    - `SUPABASE_SECRET_KEY` = la clé secrète

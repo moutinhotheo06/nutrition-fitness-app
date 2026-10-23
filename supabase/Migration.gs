@@ -3,7 +3,7 @@
  *
  * À mettre dans un NOUVEAU projet Apps Script autonome (script.new),
  * jamais dans le projet du site. Il ne fait que LIRE le classeur
- * (autorisation « lecture seule », voir appsscript.json) : le site
+ * (le code ne contient aucune écriture dans le classeur) : le site
  * en ligne n'est pas touché.
  *
  * Script Properties du nouveau projet :
