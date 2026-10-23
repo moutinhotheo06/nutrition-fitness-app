@@ -1,0 +1,451 @@
+-- Spary : schéma Supabase (étape 1 de la migration)
+-- À coller dans Supabase → SQL Editor → Run. Sans danger pour le site actuel :
+-- ce projet Supabase n'est encore branché nulle part.
+-- Réexécutable : tout est en « if not exists » / « or replace ».
+
+create extension if not exists citext;
+
+-- Fonctions internes dans un schéma non exposé par l'API (pas appelables en RPC).
+create schema if not exists app;
+grant usage on schema app to authenticated;
+
+-- ─────────────────────────────────────────────────────────────
+-- 1. Membres
+-- ─────────────────────────────────────────────────────────────
+-- members : ce que tout membre connecté peut voir (profil public).
+-- auth_user_id reste vide tant que le membre ne s'est pas reconnecté
+-- après la bascule (conversion du mot de passe à la 1re connexion).
+create table if not exists members (
+  id            uuid primary key default gen_random_uuid(),
+  auth_user_id  uuid unique references auth.users(id) on delete set null,
+  pseudo        citext not null unique check (char_length(pseudo) between 2 and 30),
+  prenom        text,
+  profile       jsonb not null default '{}'::jsonb,   -- ex-onglet Profils (bio, sports, dispos, private…)
+  avatar_url    text,                                  -- Storage (lot 2)
+  avatar_legacy text,                                  -- photo base64 de Sheets, à déplacer vers Storage puis vider
+  created_at    timestamptz not null default now(),
+  last_seen_at  timestamptz,
+  updated_at    timestamptz not null default now()
+);
+
+-- member_private : données personnelles, visibles par le membre seul.
+create table if not exists member_private (
+  member_id      uuid primary key references members(id) on delete cascade,
+  nom            text,
+  email          citext unique,
+  telephone      text,
+  date_naissance date,
+  newsletter     boolean not null default false,
+  consentement   text,
+  email_verifie  boolean not null default false,
+  migrated_at    timestamptz            -- date de la conversion du mot de passe
+);
+
+-- Membre connecté → son id Spary.
+create or replace function app.me() returns uuid
+language sql stable security definer set search_path = public, app as $$
+  select id from members where auth_user_id = auth.uid()
+$$;
+
+-- ─────────────────────────────────────────────────────────────
+-- 2. Modération (avant la messagerie, qui s'en sert)
+-- ─────────────────────────────────────────────────────────────
+create table if not exists blocks (
+  blocker    uuid not null references members(id) on delete cascade,
+  blocked    uuid not null references members(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (blocker, blocked)
+);
+
+create or replace function app.is_blocked(a uuid, b uuid) returns boolean
+language sql stable security definer set search_path = public, app as $$
+  select exists (select 1 from blocks
+                 where (blocker = a and blocked = b) or (blocker = b and blocked = a))
+$$;
+
+create table if not exists bans (
+  member_id  uuid primary key references members(id) on delete cascade,
+  until      timestamptz,               -- null = définitif
+  reason     text
+);
+
+create or replace function app.is_banned(m uuid) returns boolean
+language sql stable security definer set search_path = public, app as $$
+  select exists (select 1 from bans where member_id = m and (until is null or until > now()))
+$$;
+
+create table if not exists reports (
+  id         text primary key default gen_random_uuid()::text,
+  created_at timestamptz not null default now(),
+  reporter   uuid references members(id) on delete set null,
+  type       text,
+  target     text,
+  author     uuid references members(id) on delete set null,
+  reason     text,
+  details    text,
+  excerpt    text,
+  status     text not null default 'nouveau',
+  note       text
+);
+
+-- ─────────────────────────────────────────────────────────────
+-- 3. Messagerie (priorité n°1 : temps réel)
+-- ─────────────────────────────────────────────────────────────
+create table if not exists groups (
+  id         text primary key default gen_random_uuid()::text,
+  name       text not null check (char_length(name) <= 60),
+  creator    uuid references members(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists group_members (
+  group_id  text not null references groups(id) on delete cascade,
+  member_id uuid not null references members(id) on delete cascade,
+  added_at  timestamptz not null default now(),
+  primary key (group_id, member_id)
+);
+
+create or replace function app.in_group(g text, m uuid) returns boolean
+language sql stable security definer set search_path = public, app as $$
+  select exists (select 1 from group_members where group_id = g and member_id = m)
+$$;
+
+-- Les anciens id (≈ 1,79e15) sont gardés ; les nouveaux partent au-dessus.
+create table if not exists messages (
+  id         bigint generated by default as identity (start with 2000000000000000) primary key,
+  sender     uuid not null references members(id) on delete cascade,
+  recipient  uuid references members(id) on delete cascade,   -- message privé
+  group_id   text references groups(id) on delete cascade,     -- message de groupe
+  body       text not null check (char_length(body) <= 4000),
+  created_at timestamptz not null default now(),
+  deleted_at timestamptz,
+  check ((recipient is null) <> (group_id is null))
+);
+create index if not exists messages_dm_idx    on messages (least(sender, recipient), greatest(sender, recipient), created_at desc) where recipient is not null;
+create index if not exists messages_group_idx on messages (group_id, created_at desc) where group_id is not null;
+
+-- ex-MessagesPlus : réactions, réponses, photos, GIF…
+create table if not exists message_events (
+  id         bigint generated always as identity primary key,
+  legacy_rev text unique,
+  message_id bigint not null references messages(id) on delete cascade,
+  member_id  uuid not null references members(id) on delete cascade,
+  type       text not null,
+  value      jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists message_events_msg_idx on message_events (message_id);
+
+-- Lu / vu : un curseur par conversation ('dm:<uuid>' ou 'grp:<id>').
+create table if not exists conversation_reads (
+  member_id    uuid not null references members(id) on delete cascade,
+  conversation text not null,
+  last_read_at timestamptz not null default now(),
+  primary key (member_id, conversation)
+);
+
+create or replace function app.can_see_message(m messages) returns boolean
+language sql stable security definer set search_path = public, app as $$
+  select m.sender = app.me() or m.recipient = app.me()
+      or (m.group_id is not null and app.in_group(m.group_id, app.me()))
+$$;
+
+-- Suppression douce par l'auteur.
+create or replace function delete_message(mid bigint) returns void
+language sql security definer set search_path = public, app as $$
+  update messages set body = 'Message supprimé', deleted_at = now()
+  where id = mid and sender = app.me()
+$$;
+
+-- ─────────────────────────────────────────────────────────────
+-- 4. Social : amis, fil, commentaires, likes
+-- ─────────────────────────────────────────────────────────────
+create table if not exists friends (
+  requester  uuid not null references members(id) on delete cascade,
+  addressee  uuid not null references members(id) on delete cascade,
+  status     text not null default 'demande',
+  created_at timestamptz not null default now(),
+  primary key (requester, addressee)
+);
+
+create table if not exists posts (
+  id         text primary key default gen_random_uuid()::text,
+  author     uuid not null references members(id) on delete cascade,
+  prenom     text,
+  type       text,
+  title      text check (char_length(title) <= 200),
+  body       text check (char_length(body) <= 5000),
+  meta       jsonb not null default '{}'::jsonb,   -- ex-PostsMeta (sport, durée)
+  image_url  text,                                  -- Storage (lot 2)
+  image_legacy text,                                -- base64 de AnnoncesImages, à déplacer
+  created_at timestamptz not null default now()
+);
+create index if not exists posts_created_idx on posts (created_at desc);
+
+create table if not exists comments (
+  id         text primary key default gen_random_uuid()::text,
+  post_id    text not null references posts(id) on delete cascade,
+  author     uuid not null references members(id) on delete cascade,
+  body       text not null check (char_length(body) <= 2000),
+  created_at timestamptz not null default now()
+);
+create index if not exists comments_post_idx on comments (post_id, created_at);
+
+create table if not exists likes (
+  post_id   text not null references posts(id) on delete cascade,
+  member_id uuid not null references members(id) on delete cascade,
+  primary key (post_id, member_id)
+);
+
+-- ─────────────────────────────────────────────────────────────
+-- 5. Séances, matchs, entraînements
+-- ─────────────────────────────────────────────────────────────
+create table if not exists seances (
+  id          text primary key default gen_random_uuid()::text,
+  organizer   uuid not null references members(id) on delete cascade,
+  sport       text not null,
+  place       text,
+  lat         double precision,
+  lng         double precision,
+  starts_at   timestamptz not null,
+  places      int check (places between 1 and 100),
+  fee_total   numeric(8,2),
+  level       text,
+  note        text,
+  status      text not null default 'ouverte',
+  options     jsonb not null default '{}'::jsonb,   -- ex-SeancesOptions (18+…)
+  created_at  timestamptz not null default now()
+);
+create index if not exists seances_start_idx on seances (starts_at);
+
+create table if not exists seance_members (
+  seance_id text not null references seances(id) on delete cascade,
+  member_id uuid not null references members(id) on delete cascade,
+  joined_at timestamptz not null default now(),
+  primary key (seance_id, member_id)
+);
+
+create table if not exists seance_waitlist (
+  seance_id   text not null references seances(id) on delete cascade,
+  member_id   uuid not null references members(id) on delete cascade,
+  created_at  timestamptz not null default now(),
+  status      text not null default 'attente',
+  promoted_at timestamptz,
+  primary key (seance_id, member_id)
+);
+
+create table if not exists matches (
+  id          text primary key default gen_random_uuid()::text,
+  created_at  timestamptz not null default now(),
+  player_a    uuid not null references members(id) on delete cascade,
+  player_b    uuid not null references members(id) on delete cascade,
+  sport       text,
+  score       text,
+  a_wins      boolean,
+  status      text not null default 'en attente',
+  resolved_at timestamptz
+);
+
+create table if not exists kudos (
+  seance_id  text not null,
+  giver      uuid not null references members(id) on delete cascade,
+  receiver   uuid not null references members(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (seance_id, giver, receiver)
+);
+
+create table if not exists points (
+  id         bigint generated always as identity primary key,
+  legacy_key text unique,
+  member_id  uuid not null references members(id) on delete cascade,
+  type       text,
+  ref        text,
+  points     int not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists trainings (
+  id          text primary key default gen_random_uuid()::text,
+  member_id   uuid not null references members(id) on delete cascade,
+  sport       text,
+  started_at  timestamptz,
+  duration_s  int,
+  distance_km numeric(8,3),
+  feeling     int,
+  note        text,
+  source      text,
+  health_id   text,
+  created_at  timestamptz not null default now()
+);
+
+create table if not exists coaches (
+  member_id  uuid primary key references members(id) on delete cascade,
+  data       jsonb not null default '{}'::jsonb,
+  status     text not null default 'en attente',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists push_subscriptions (
+  endpoint   text primary key,
+  member_id  uuid not null references members(id) on delete cascade,
+  p256dh     text,
+  auth       text,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz
+);
+
+-- ─────────────────────────────────────────────────────────────
+-- 6. Archive : les onglets pas encore normalisés (copie brute)
+-- ─────────────────────────────────────────────────────────────
+-- Avis, Notes, NiveauxVotes, Recours, Parrainages, AlertesPrefs, Parcours,
+-- ConnexionsApple, SeancesPlus, Visites, etc. Rien n'est perdu ; chaque
+-- onglet aura sa vraie table dans le lot qui le concerne.
+-- Accessible au service seulement (aucune règle = personne côté site).
+create table if not exists legacy_rows (
+  tab        text not null,
+  row_num    int  not null,
+  data       jsonb not null,
+  copied_at  timestamptz not null default now(),
+  primary key (tab, row_num)
+);
+
+-- ─────────────────────────────────────────────────────────────
+-- 7. Sécurité : RLS partout
+-- ─────────────────────────────────────────────────────────────
+do $$
+declare t text;
+begin
+  foreach t in array array['members','member_private','blocks','bans','reports','groups',
+    'group_members','messages','message_events','conversation_reads','friends','posts',
+    'comments','likes','seances','seance_members','seance_waitlist','matches','kudos',
+    'points','trainings','coaches','push_subscriptions','legacy_rows']
+  loop
+    execute format('alter table %I enable row level security', t);
+  end loop;
+end $$;
+
+-- Supprime les anciennes règles avant de les recréer (script réexécutable).
+do $$
+declare r record;
+begin
+  for r in select policyname, tablename from pg_policies where schemaname = 'public' loop
+    execute format('drop policy %I on %I', r.policyname, r.tablename);
+  end loop;
+end $$;
+
+-- members
+create policy members_read   on members for select to authenticated using (true);
+create policy members_update on members for update to authenticated
+  using (id = app.me()) with check (id = app.me());
+
+-- member_private : soi seulement
+create policy private_read   on member_private for select to authenticated using (member_id = app.me());
+create policy private_update on member_private for update to authenticated
+  using (member_id = app.me()) with check (member_id = app.me());
+
+-- blocks
+create policy blocks_read   on blocks for select to authenticated using (blocker = app.me());
+create policy blocks_insert on blocks for insert to authenticated with check (blocker = app.me());
+create policy blocks_delete on blocks for delete to authenticated using (blocker = app.me());
+
+-- reports : on signale, on suit les siens
+create policy reports_insert on reports for insert to authenticated with check (reporter = app.me());
+create policy reports_read   on reports for select to authenticated using (reporter = app.me());
+
+-- groups
+create policy groups_read   on groups for select to authenticated using (app.in_group(id, app.me()));
+create policy groups_insert on groups for insert to authenticated with check (creator = app.me());
+create policy gm_read   on group_members for select to authenticated using (app.in_group(group_id, app.me()));
+create policy gm_insert on group_members for insert to authenticated
+  with check (exists (select 1 from groups g where g.id = group_id and g.creator = app.me()) or member_id = app.me());
+create policy gm_leave  on group_members for delete to authenticated using (member_id = app.me());
+
+-- messages
+create policy messages_read on messages for select to authenticated using (app.can_see_message(messages));
+create policy messages_send on messages for insert to authenticated with check (
+  sender = app.me() and not app.is_banned(app.me()) and (
+    (recipient is not null and not app.is_blocked(app.me(), recipient))
+    or (group_id is not null and app.in_group(group_id, app.me()))
+  )
+);
+-- pas d'update direct : suppression via delete_message()
+
+create policy events_read on message_events for select to authenticated
+  using (exists (select 1 from messages m where m.id = message_id and app.can_see_message(m)));
+create policy events_add on message_events for insert to authenticated
+  with check (member_id = app.me() and exists (select 1 from messages m where m.id = message_id and app.can_see_message(m)));
+create policy events_del on message_events for delete to authenticated using (member_id = app.me());
+
+create policy reads_all on conversation_reads for all to authenticated
+  using (member_id = app.me()) with check (member_id = app.me());
+
+-- friends
+create policy friends_read   on friends for select to authenticated using (app.me() in (requester, addressee));
+create policy friends_ask    on friends for insert to authenticated with check (requester = app.me() and not app.is_blocked(requester, addressee));
+create policy friends_answer on friends for update to authenticated using (addressee = app.me()) with check (addressee = app.me());
+create policy friends_remove on friends for delete to authenticated using (app.me() in (requester, addressee));
+
+-- posts / comments / likes : lecture par tous les membres, hors bloqués
+create policy posts_read   on posts for select to authenticated using (not app.is_blocked(app.me(), author));
+create policy posts_insert on posts for insert to authenticated with check (author = app.me() and not app.is_banned(app.me()));
+create policy posts_delete on posts for delete to authenticated using (author = app.me());
+
+create policy comments_read   on comments for select to authenticated using (not app.is_blocked(app.me(), author));
+create policy comments_insert on comments for insert to authenticated with check (author = app.me() and not app.is_banned(app.me()));
+create policy comments_delete on comments for delete to authenticated using (author = app.me());
+
+create policy likes_read on likes for select to authenticated using (true);
+create policy likes_add  on likes for insert to authenticated with check (member_id = app.me());
+create policy likes_del  on likes for delete to authenticated using (member_id = app.me());
+
+-- séances
+create policy seances_read   on seances for select to authenticated using (true);
+create policy seances_insert on seances for insert to authenticated with check (organizer = app.me() and not app.is_banned(app.me()));
+create policy seances_update on seances for update to authenticated using (organizer = app.me()) with check (organizer = app.me());
+
+create policy sm_read  on seance_members for select to authenticated using (true);
+create policy sm_join  on seance_members for insert to authenticated with check (member_id = app.me());
+create policy sm_leave on seance_members for delete to authenticated using (member_id = app.me());
+
+create policy wl_read  on seance_waitlist for select to authenticated using (true);
+create policy wl_join  on seance_waitlist for insert to authenticated with check (member_id = app.me());
+create policy wl_leave on seance_waitlist for delete to authenticated using (member_id = app.me());
+
+-- matchs : classement public, déclaration par le joueur A, réponse du joueur B
+create policy matches_read    on matches for select to authenticated using (true);
+create policy matches_declare on matches for insert to authenticated with check (player_a = app.me());
+create policy matches_answer  on matches for update to authenticated using (player_b = app.me()) with check (player_b = app.me());
+
+create policy kudos_read on kudos for select to authenticated using (true);
+create policy kudos_give on kudos for insert to authenticated with check (giver = app.me() and receiver <> app.me());
+
+create policy points_read on points for select to authenticated using (true);   -- écrits par le serveur seulement
+
+create policy trainings_all on trainings for all to authenticated
+  using (member_id = app.me()) with check (member_id = app.me());
+
+create policy coaches_read on coaches for select to authenticated using (status = 'validé' or member_id = app.me());
+create policy coaches_ask  on coaches for insert to authenticated with check (member_id = app.me());
+
+create policy push_all on push_subscriptions for all to authenticated
+  using (member_id = app.me()) with check (member_id = app.me());
+
+-- Colonnes modifiables (le pseudo, le lien de compte, l'auteur… restent figés).
+revoke update on members, member_private, seances, matches, friends from authenticated;
+grant update (prenom, profile, avatar_url, last_seen_at, updated_at) on members to authenticated;
+grant update (telephone, newsletter) on member_private to authenticated;
+grant update (sport, place, lat, lng, starts_at, places, fee_total, level, note, status, options) on seances to authenticated;
+grant update (status, resolved_at) on matches to authenticated;
+grant update (status) on friends to authenticated;
+
+-- bans, legacy_rows : aucune règle → invisibles côté site (service seulement).
+
+-- ─────────────────────────────────────────────────────────────
+-- 8. Temps réel (messagerie)
+-- ─────────────────────────────────────────────────────────────
+do $$
+begin
+  begin execute 'alter publication supabase_realtime add table messages'; exception when duplicate_object then null; end;
+  begin execute 'alter publication supabase_realtime add table message_events'; exception when duplicate_object then null; end;
+end $$;
+-- « en train d'écrire » : canal Realtime « broadcast », aucune table.
