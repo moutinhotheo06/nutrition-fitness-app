@@ -7,6 +7,7 @@ Rien ici ne touche le site en ligne, Code.gs ni les Apps Script actuels. La basc
 
 | Fichier | Rôle |
 |---|---|
+| `002_chat_seance.sql` | Chats de séance (canal « #id »). À passer après 001. Si tu relances 001 un jour, relance 002 juste après. |
 | `001_schema.sql` | Tables, règles de sécurité (RLS), temps réel pour la messagerie. Testé sur PostgreSQL 16 (réexécutable). |
 | `Migration.gs` + `appsscript.json` | Copie Sheets → Supabase dans un **nouveau** projet Apps Script, sans aucune écriture dans le classeur. |
 | `functions/auth-login/index.ts` | Connexion unique : convertit le mot de passe à la 1re connexion, sans PEPPER ni hash copiés. |

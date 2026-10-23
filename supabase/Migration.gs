@@ -72,6 +72,18 @@ function migCopier() {
       author: m(r[5]), reason: str_(r[6]), details: str_(r[7]), excerpt: str_(r[8]), status: str_(r[9]) || "nouveau", note: str_(r[10]) };
   }).filter(both_("id")), "id"), "id"));
 
+  // 3a. Séances (avant les messages : les chats de séance « #id » en dépendent)
+  var opts = {};
+  tab("SeancesOptions").forEach(function (r) { var k = String(r[0]); (opts[k] = opts[k] || {})[String(r[1])] = r[2]; });
+  var seances = [], sset = {};
+  tab("Seances").forEach(function (r) {
+    var id = String(r[0] || ""), o = m(r[1]), st = iso_(r[7]); if (!id || !o || !st) return;
+    seances.push({ id: id, organizer: o, sport: str_(r[3]) || "?", place: str_(r[4]), lat: num_(r[5]), lng: num_(r[6]),
+      starts_at: st, places: Math.min(100, Math.max(1, Number(r[8]) || 1)), fee_total: num_(r[9]), level: str_(r[10]),
+      note: str_(r[11]), status: str_(r[12]) || "ouverte", options: opts[id] || {}, created_at: iso_(r[13]) || now_() });
+    sset[id] = 1;
+  });
+  rep.push(migUpsert_(c, "seances", dedupe_(seances, "id"), "id"));
   // 3. Messagerie
   var groups = dedupe_(tab("Groupes").map(function (r) {
     return { id: String(r[0]).replace(/^#/, ""), name: str_(r[1]) || "Groupe", creator: m(r[2]), created_at: iso_(r[3]) || now_() };
@@ -85,9 +97,12 @@ function migCopier() {
   var msgs = [], mset = {};
   tab("Messages").forEach(function (r) {
     var id = Number(r[0]), to = String(r[2] || ""), s = m(r[1]); if (!id || !s) return;
-    var row = { id: id, sender: s, recipient: null, group_id: null, body: String(r[3] || "").slice(0, 4000) || " ",
+    var row = { id: id, sender: s, recipient: null, group_id: null, seance_id: null, body: String(r[3] || "").slice(0, 4000) || " ",
       created_at: iso_(r[4]) || iso_(id) || now_(), deleted_at: null };
-    if (to.charAt(0) === "#") { row.group_id = to.slice(1); if (!gset[row.group_id]) return; }
+    if (to.charAt(0) === "#") {   // canal « #id » : chat de séance ou groupe
+      var ch = to.slice(1);
+      if (gset[ch]) row.group_id = ch; else if (sset[ch]) row.seance_id = ch; else return;
+    }
     else { row.recipient = m(to); if (!row.recipient) return; }
     if (row.body === "Message supprimé") row.deleted_at = row.created_at;
     msgs.push(row); mset[id] = 1;
@@ -121,18 +136,7 @@ function migCopier() {
     return { post_id: String(r[0]), member_id: m(r[1]) };
   }).filter(function (x) { return pset[x.post_id] && x.member_id; }), "post_id,member_id"), "post_id,member_id"));
 
-  // 5. Séances, matchs, entraînements
-  var opts = {};
-  tab("SeancesOptions").forEach(function (r) { var k = String(r[0]); (opts[k] = opts[k] || {})[String(r[1])] = r[2]; });
-  var seances = [], sset = {};
-  tab("Seances").forEach(function (r) {
-    var id = String(r[0] || ""), o = m(r[1]), st = iso_(r[7]); if (!id || !o || !st) return;
-    seances.push({ id: id, organizer: o, sport: str_(r[3]) || "?", place: str_(r[4]), lat: num_(r[5]), lng: num_(r[6]),
-      starts_at: st, places: Math.min(100, Math.max(1, Number(r[8]) || 1)), fee_total: num_(r[9]), level: str_(r[10]),
-      note: str_(r[11]), status: str_(r[12]) || "ouverte", options: opts[id] || {}, created_at: iso_(r[13]) || now_() });
-    sset[id] = 1;
-  });
-  rep.push(migUpsert_(c, "seances", dedupe_(seances, "id"), "id"));
+  // 5. Inscriptions, matchs, entraînements
   rep.push(migUpsert_(c, "seance_members", dedupe_(tab("Inscriptions").map(function (r) {
     return { seance_id: String(r[0]), member_id: m(r[1]), joined_at: iso_(r[3]) || now_() };
   }).filter(function (x) { return sset[x.seance_id] && x.member_id; }), "seance_id,member_id"), "seance_id,member_id"));
