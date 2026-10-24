@@ -246,3 +246,51 @@ function iso_(v) {
   var d = new Date(String(v)); return isNaN(d) ? null : d.toISOString();
 }
 function day_(v) { var s = iso_(v); if (!s) return null; return Utilities.formatDate(new Date(s), "Europe/Paris", "yyyy-MM-dd"); }
+
+// ═════════════ Copie pour le moteur « Apps Script sur Supabase » ═════════════
+// Copie chaque onglet tel quel (cellules + dates) dans gas_sheets, les grosses cellules
+// (photos) dans gas_blobs, et les photos de la messagerie (dossier Drive) dans gas_files.
+// Réexécutable : remplace la copie précédente. Ne modifie pas le classeur.
+// Script Property facultative : SP34_FOLDER = id du dossier Drive des photos des messages
+// (même valeur que dans les propriétés du projet du site).
+function migMoteur() {
+  var c = migCfg_(), ss = SpreadsheetApp.openById(c.sheet), rep = [], blobs = {};
+  ss.getSheets().forEach(function (sh, pos) {
+    var name = sh.getName(), last = sh.getLastRow(), lastC = sh.getLastColumn(), data = [];
+    if (last > 0 && lastC > 0) {
+      var v = sh.getRange(1, 1, last, lastC).getValues();
+      data = v.map(function (row) {
+        var n = row.length; while (n > 0 && row[n - 1] === "") n--;
+        return row.slice(0, n).map(function (x) {
+          if (x instanceof Date) return isNaN(x.getTime()) ? "" : { $d: x.getTime() };
+          if (typeof x === "string" && x.length > 4000) { var id = migSha1_(x); blobs[id] = x; return { $b: id }; }
+          return x;
+        });
+      });
+    }
+    var r = migHttp_(c, "post", "/rest/v1/gas_sheets?on_conflict=name", [{ name: name, pos: pos, data: data }], "resolution=merge-duplicates,return=minimal");
+    rep.push(name + " : " + data.length + " lignes" + (r.code < 300 ? "" : "  ERREUR " + r.code + " " + r.text.slice(0, 200)));
+  });
+  var ids = Object.keys(blobs), okB = 0;
+  for (var i = 0; i < ids.length; i += 20) {
+    var part = ids.slice(i, i + 20).map(function (id) { return { id: id, value: blobs[id] }; });
+    var rb = migHttp_(c, "post", "/rest/v1/gas_blobs?on_conflict=id", part, "resolution=merge-duplicates,return=minimal");
+    if (rb.code < 300) okB += part.length; else rep.push("gas_blobs ERREUR " + rb.code + " " + rb.text.slice(0, 200));
+  }
+  rep.push("Grosses cellules (photos) : " + okB + "/" + ids.length);
+  var folder = PropertiesService.getScriptProperties().getProperty("SP34_FOLDER");
+  if (folder) {
+    var it = DriveApp.getFolderById(folder).getFiles(), nf = 0, ef = 0;
+    while (it.hasNext()) {
+      var f = it.next(), b = f.getBlob();
+      var rf = migHttp_(c, "post", "/rest/v1/gas_files?on_conflict=id", [{ id: f.getId(), name: f.getName(), mime: b.getContentType() || "application/octet-stream", b64: Utilities.base64Encode(b.getBytes()), trashed: f.isTrashed(), folder: folder }], "resolution=merge-duplicates,return=minimal");
+      if (rf.code < 300) nf++; else ef++;
+    }
+    rep.push("Photos des messages : " + nf + " copiées" + (ef ? ", " + ef + " erreurs" : ""));
+  } else rep.push("Photos des messages : SP34_FOLDER non renseigné, ignorées");
+  Logger.log("Copie moteur terminée :\n" + rep.join("\n"));
+}
+function migSha1_(s) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_1, s, Utilities.Charset.UTF_8)
+    .map(function (b) { return ((b + 256) % 256).toString(16).replace(/^(.)$/, "0$1"); }).join("");
+}
