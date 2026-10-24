@@ -5,7 +5,7 @@
 // Les opérations impossibles en synchrone (blob pas encore chargé, appel réseau, verrou)
 // lèvent un « besoin » : l'essai est jeté, le moteur charge ce qu'il faut et relance.
 
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, createSign, randomUUID } from "node:crypto";
 import { ParisDate, parisParts } from "./parisdate.ts";
 
 // ───────── Valeurs ─────────
@@ -114,6 +114,9 @@ function makeSheet(a: Attempt, sh: State["sheets"][number]) {
       getDisplayValues() { return (R.getValues as () => unknown[][])().map((row) => row.map((x) => x instanceof Date ? Utilities.formatDate(x, "Europe/Paris", "dd/MM/yyyy HH:mm:ss") : String(x))); },
       getValue() { guard(a); return outVal(a, getCell(r, c)); },
       getDisplayValue() { const v = R.getValue as () => unknown; const x = v(); return x instanceof Date ? Utilities.formatDate(x, "Europe/Paris", "dd/MM/yyyy HH:mm:ss") : String(x); },
+      // Pas de formules dans la base Supabase : toujours vide (le contrôle de sécurité ne trouve donc rien).
+      getFormulas() { return (R.getValues as () => unknown[][])().map((row) => row.map(() => "")); },
+      getFormula() { return ""; },
       setValue(v: unknown) { guard(a); for (let i = 0; i < nr; i++) for (let j = 0; j < nc; j++) setCell(r + i, c + j, v); dirty(); return R; },
       setValues(vs: unknown[][]) {
         guard(a);
@@ -346,9 +349,12 @@ export function buildGlobals(a: Attempt): Record<string, any> {
     DigestAlgorithm: { MD2: "md2", MD5: "md5", SHA_1: "sha1", SHA_256: "sha256", SHA_384: "sha384", SHA_512: "sha512" },
     MacAlgorithm: { HMAC_MD5: "md5", HMAC_SHA_1: "sha1", HMAC_SHA_256: "sha256", HMAC_SHA_384: "sha384", HMAC_SHA_512: "sha512" },
     Charset: { UTF_8: "utf-8", US_ASCII: "ascii" },
+    RsaAlgorithm: { RSA_SHA_1: "sha1", RSA_SHA_256: "sha256" },
     computeDigest: (alg: string, v: unknown) => toSigned(createHash(alg).update(toBytes(v)).digest()),
     computeHmacSha256Signature: (v: unknown, k: unknown) => toSigned(createHmac("sha256", toBytes(k)).update(toBytes(v)).digest()),
     computeHmacSignature: (alg: string, v: unknown, k: unknown) => toSigned(createHmac(alg, toBytes(k)).update(toBytes(v)).digest()),
+    computeRsaSha256Signature: (v: unknown, key: string) => toSigned(createSign("RSA-SHA256").update(toBytes(v)).sign(String(key))),
+    computeRsaSignature: (alg: string, v: unknown, key: string) => toSigned(createSign(/256/.test(String(alg)) ? "RSA-SHA256" : "RSA-SHA1").update(toBytes(v)).sign(String(key))),
     base64Encode: (v: unknown) => b64(toBytes(v)),
     base64EncodeWebSafe: (v: unknown) => b64(toBytes(v)).replace(/\+/g, "-").replace(/\//g, "_"),
     base64Decode: (s: string) => toSigned(unb64(s)),

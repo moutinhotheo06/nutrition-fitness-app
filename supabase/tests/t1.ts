@@ -23,7 +23,7 @@ const ps = await call({ action: "profileSave", token: lg.token, profile: { displ
 ok(ps.status === "success", "profil");
 const pg = await call({ action: "profileGet", token: reg2.token, pseudo: "lea_m" }, true);
 ok(pg.status === "success", "voir profil");
-const sc = await call({ action: "sessionCreate", token: lg.token, sport: "Football / Five", place: "Urban Soccer", lat: 48.85, lng: 2.35, start: Date.now() + 86400000, spots: 10, fee: 0, level: "Tous niveaux", note: "" }, true);
+const sc = await call({ action: "sessionCreate", token: lg.token, sport: "Football / Five", place: "Urban Soccer", lat: 48.85, lng: 2.35, start: Date.now() + 86400000, slots: 10, fee: 0, level: "Tous niveaux", note: "" }, true);
 ok(sc.status === "success", "créer séance");
 const sl = await call({ action: "sessionList", token: reg2.token }, true);
 ok(sl.status === "success", "liste séances");

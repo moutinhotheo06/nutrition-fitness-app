@@ -287,6 +287,9 @@ function migMoteur() {
       if (rf.code < 300) nf++; else ef++;
     }
     rep.push("Photos des messages : " + nf + " copiées" + (ef ? ", " + ef + " erreurs" : ""));
+    // Le code du site retrouve ainsi son dossier photos (sinon il en créerait un nouveau, vide).
+    var rp = migHttp_(c, "post", "/rest/v1/gas_props?on_conflict=key", [{ key: "SP34_FOLDER", value: folder }], "resolution=merge-duplicates,return=minimal");
+    if (rp.code >= 300) rep.push("gas_props ERREUR " + rp.code + " " + rp.text.slice(0, 200));
   } else rep.push("Photos des messages : SP34_FOLDER non renseigné, ignorées");
   Logger.log("Copie moteur terminée :\n" + rep.join("\n"));
 }

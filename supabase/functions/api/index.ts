@@ -10,6 +10,27 @@ const sql = postgres(env("SUPABASE_DB_URL"), { max: 4, prepare: false, idle_time
 const SELF = env("SUPABASE_URL").replace(/\/+$/, "") + "/functions/v1/api";
 const CRON = new Set(["sp34Rappels", "sp34Nettoyer", "rgpdQuotidien", "secSauvegarder", "secControleQuotidien", "sp17MettreAJour"]);
 
+// Planning des anciens déclencheurs Apps Script, à l'heure de Paris (le serveur et pg_cron sont en UTC).
+// pg_cron appelle « ?cron=quart » toutes les 15 minutes ; on choisit ici ce qui doit tourner.
+function dueNow(d = new Date()): string[] {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", hourCycle: "h23", hour: "2-digit", minute: "2-digit", weekday: "short" })
+    .formatToParts(d).map((x) => [x.type, x.value]));
+  const h = +p.hour, m = +p.minute, top = m < 15, out = ["sp34Rappels"];
+  if (top && h === 4) out.push("sp34Nettoyer", "rgpdQuotidien", "sp17MettreAJour");
+  if (top && h === 7) out.push("secControleQuotidien");
+  if (top && h === 3 && p.weekday === "Sun") out.push("secSauvegarder");
+  return out;
+}
+
+// Clé des tâches planifiées : lue dans le coffre Supabase (Vault, nom « spary_cron »), créé par 005_cron.sql.
+let cronKey = "";
+async function cronSecret(): Promise<string> {
+  if (cronKey) return cronKey;
+  if (env("CRON_SECRET")) return (cronKey = env("CRON_SECRET"));
+  try { const r = await sql`select decrypted_secret from vault.decrypted_secrets where name = 'spary_cron' limit 1`; cronKey = r[0]?.decrypted_secret || ""; } catch { cronKey = ""; }
+  return cronKey;
+}
+
 const ORIGINS = ["https://spary.fr", "https://www.spary.fr", "capacitor://localhost", "http://localhost", "https://localhost", "ionic://localhost"];
 function cors(req: Request) {
   const o = req.headers.get("origin") || "";
@@ -24,10 +45,16 @@ Deno.serve(async (req) => {
   try {
     // Tâches planifiées (pg_cron) : protégées par le secret CRON_SECRET.
     if (req.method === "POST" && url.searchParams.get("cron")) {
-      const fn = url.searchParams.get("cron")!;
-      if (!env("CRON_SECRET") || req.headers.get("x-cron-secret") !== env("CRON_SECRET") || !CRON.has(fn)) return new Response("interdit", { status: 403 });
-      const r = await runGas({ sql, code: CODE, env, scriptUrl: SELF }, { kind: "call", fn });
-      return new Response(JSON.stringify({ ok: true, logs: r.logs.slice(-20) }), { headers: { "Content-Type": "application/json" } });
+      const fn = url.searchParams.get("cron")!, key = await cronSecret();
+      if (!key || req.headers.get("x-cron-secret") !== key) return new Response("interdit", { status: 403 });
+      const list = fn === "quart" ? dueNow() : CRON.has(fn) ? [fn] : [];
+      if (!list.length) return new Response("tâche inconnue", { status: 400 });
+      const done: Record<string, unknown> = {};
+      for (const f of list) {   // l'une après l'autre ; une erreur n'empêche pas les suivantes
+        try { const r = await runGas({ sql, code: CODE, env, scriptUrl: SELF }, { kind: "call", fn: f }); done[f] = r.logs.slice(-5); }
+        catch (e) { console.error("cron " + f, e); done[f] = "ERREUR " + String(e).slice(0, 300); }
+      }
+      return new Response(JSON.stringify({ ok: true, done }), { headers: { "Content-Type": "application/json" } });
     }
     if (req.method === "GET") {
       const params: Record<string, string> = {}; url.searchParams.forEach((v, k) => { params[k] = v; });

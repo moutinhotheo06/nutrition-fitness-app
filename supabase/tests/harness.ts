@@ -4,7 +4,7 @@ import { runGas } from "../functions/api/gas/engine.ts";
 import { CODE } from "../functions/api/gas/bundle.ts";
 
 export const sql = postgres(process.env.PGURL || "postgres://postgres@localhost:5499/gastest", { max: 4, onnotice: () => {} });
-const ENV: Record<string, string> = { GAS_PEPPER: "poivre-de-test-123456789", ...(globalThis as any).TEST_ENV };
+const ENV: Record<string, string> = { GAS_PEPPER: "poivre-de-test-123456789", ...(process.env.TEST_ENV_FILE ? JSON.parse(require("fs").readFileSync(process.env.TEST_ENV_FILE, "utf8")) : {}) };
 export const env = (k: string) => ENV[k] || "";
 export async function reset() {
   await sql`truncate gas_sheets, gas_blobs, gas_props, gas_cache, gas_files, gas_history`;
