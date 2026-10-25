@@ -66,7 +66,7 @@ Attention : c'est une copie des vraies données avec les vraies clés. Un messag
 
 ## B. Bascule (le soir, quand peu de monde est connecté, ≈ 15 min)
 
-1. Projet Spary – Migration → exécuter **migMoteur** (copie finale).
+1. Projet Spary – Migration → exécuter **migMoteur** (copie finale), puis SQL Editor → `delete from gas_cache;` (vide le cache du test).
 2. Tout de suite après : projet Apps Script du site → ajouter le fichier **Relais** (`Relais.gs`, en dernier) → Déployer → Gérer les déploiements → crayon → Nouvelle version → exécuter `relaisVerifier` (doit afficher OK). À partir de là, les anciennes versions du site écrivent aussi dans Supabase.
 3. Projet Apps Script du site → Déclencheurs (horloge à gauche) → supprimer tous les déclencheurs (rappels, RGPD, sauvegarde, contrôle, stats) : Supabase prend le relais.
 4. Supabase → SQL Editor → coller `005_cron.sql` → Run. Les deux tâches `spary-quart` et `spary-purge` doivent s'afficher.
