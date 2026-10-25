@@ -8033,7 +8033,10 @@ function lot30Verifier() {
 
 // functions/api/index.ts
 var env = (k) => Deno.env.get(k) || "";
-var sql = postgres(env("SUPABASE_DB_URL"), { max: 4, prepare: false, idle_timeout: 20, connect_timeout: 10, onnotice: () => {} });
+var sql = postgres(env("DB_POOL_URL") || env("SUPABASE_DB_URL"), { max: 2, prepare: false, idle_timeout: 3, max_lifetime: 60, connect_timeout: 10, onnotice: () => {} });
+addEventListener("beforeunload", () => {
+  sql.end({ timeout: 1 }).catch(() => {});
+});
 var SELF = env("SUPABASE_URL").replace(/\/+$/, "") + "/functions/v1/api";
 var CRON = new Set(["sp34Rappels", "sp34Nettoyer", "rgpdQuotidien", "secSauvegarder", "secControleQuotidien", "sp17MettreAJour"]);
 function dueNow(d = new Date) {

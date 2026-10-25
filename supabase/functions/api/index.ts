@@ -6,7 +6,11 @@ import { runGas } from "./gas/engine.ts";
 import { CODE } from "./gas/bundle.ts";
 
 const env = (k: string) => Deno.env.get(k) || "";
-const sql = postgres(env("SUPABASE_DB_URL"), { max: 4, prepare: false, idle_timeout: 20, connect_timeout: 10, onnotice: () => {} });
+// Connexion par le pooler Supabase (DB_POOL_URL, port 6543, mode transaction) : l'appli ouvre beaucoup de requêtes
+// en même temps et chaque requête peut démarrer une nouvelle instance ; en direct, la limite de connexions saute.
+const sql = postgres(env("DB_POOL_URL") || env("SUPABASE_DB_URL"), { max: 2, prepare: false, idle_timeout: 3, max_lifetime: 60, connect_timeout: 10, onnotice: () => {} });
+// Instance arrêtée : on rend les connexions tout de suite.
+addEventListener("beforeunload", () => { sql.end({ timeout: 1 }).catch(() => {}); });
 const SELF = env("SUPABASE_URL").replace(/\/+$/, "") + "/functions/v1/api";
 const CRON = new Set(["sp34Rappels", "sp34Nettoyer", "rgpdQuotidien", "secSauvegarder", "secControleQuotidien", "sp17MettreAJour"]);
 
